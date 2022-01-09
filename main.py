@@ -1,6 +1,6 @@
 import pathlib
 import typing
-
+import tensorflow as tf
 import argh
 import yaml
 
@@ -65,6 +65,11 @@ def inference(generated_tokens: int = 20, temp: float = 0.2, config_path: str = 
 
 
 if __name__ == '__main__':
+    tf.debugging.experimental.enable_dump_debug_info(
+        "/tmp/tfdbg2_logdir",
+        tensor_debug_mode="FULL_HEALTH",
+        circular_buffer_size=-1)
+
     parser = argh.ArghParser()
     parser.add_commands([preprocess, train, inference])
     parser.dispatch()

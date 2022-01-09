@@ -8,14 +8,14 @@ from src.optimizers.build import build_optimizer
 from tensorflow.python.ops.numpy_ops import np_config
 np_config.enable_numpy_behavior()
 from src.dataclass import Context
-
+tf.compat.v1.enable_eager_execution()
 def split_norm(inp: tf.Tensor) -> tf.Tensor:
     scale0, scale1, shift = tf.split(inp,3, 1)
-    return tf.norm(tf.add(tf.matmul(scale0 , scale1) , shift))
+    return tf.norm(tf.add(tf.multiply(scale0 , scale1) , shift))
 
 def norm(out: tf.Tensor) -> tf.Tensor:
     out = out - out.mean(1, keepdim=True)
-    return tf.divide(out,  (tf.add(tf.math.pow(tf.matmul (tf.norm(out, (2, 1)) , out.size(1)) , -0.5 ), 1e-5)))
+    return tf.divide(out,  (tf.add(tf.math.pow(tf.multiply (tf.norm(out, (2, 1)) , out.size(1)) , -0.5 ), 1e-5)))
 
 
 def conv(inp: tf.Tensor, weight: tf.Tensor, groups: int, use_pad: bool) -> tf.Tensor:
@@ -49,7 +49,7 @@ def orthonormal(inp: typing.Union[tf.Tensor, tf.Variable, typing.List[int]], gai
     a = g1.normal(flat_shape)
     u, _, v = tf.linalg.svd(a, full_matrices=False)
 
-    inp = tf.math.multiply((u if u.shape == flat_shape else v),gain)
+    inp = (u if u.shape == flat_shape else v)*gain
     if isinstance(original_input, list):
         return tf.Variable(inp)
     return original_input
@@ -61,13 +61,12 @@ def moe(inp: tf.Tensor, w: typing.List[tf.Variable],
     gates = tf.nn.softmax(out, dim=1)
     one_hot = tf.one_hot(tf.argmax(out, dim=1), out.shape[1])
     gumbel = one_hot.transpose(1, 2) - gates.detach() + gates
-    one_hot = one_hot.to(dtype=tf.bool)
     inp_t = inp.transpose(1, 2)
     batch, features, sequence = inp.size()
     out = tf.zeros((batch * sequence, w[0].size(1)),  dtype=inp.dtype)
     for expert, g, param in zip(one_hot.unbind(-1), gumbel.unbind(1), w):
         tmp =tf.boolean_mask(inp_t * g.unsqueeze(2), expert.unsqueeze(2)).view(-1, features).mm(param)
-        out = out.masked_scatter(expert.view(-1, 1), tmp)
+        out = out.boolean_mask(expert.view(-1, 1), tmp)
     loss = tf.math.reduce_sum(tf.math.reduce_mean(gates, dim=(0, 2)) * tf.math.reduce_mean(one_hot.float(), dim=(0, 1)))
     return loss, out.view(batch, sequence, -1).transpose(1, 2)
 
@@ -133,56 +132,65 @@ def conv_weight(in_features: int, out_features: int, kernel_size: int, groups: i
     local_conv.build(in_features)
     return orthonormal( local_conv.kernel, 1 / std)
 
-class Trainer(tf.keras.Model):
+class Trainer(object):
     def __init__(self,model):
         super(Trainer, self).__init__()
 
         self.model = model
         self.optimizer = tf.keras.optimizers.Adam()
 
+    def softargmax(self,x, beta=1e10):
+        x_range = tf.range(x.shape.as_list()[-1], dtype=x.dtype)
+        return tf.reduce_sum(tf.nn.softmax(x * beta) * x_range, axis=-1)
+    @tf.function
+    def _forward_backward(self, src_arr: tf.Tensor, tgt_arr: tf.Tensor) -> tf.Tensor:
 
-    def _to_device_detach(self, inp: tf.Tensor) -> tf.Tensor:
-        return inp.to(device=self.ctx.model.device, non_blocking=True).detach()
+        with tf.GradientTape() as tape:
+            tape.watch(self.model.trainable_variables)
+            loss = 0
+            for (s, t), _ in zip(src_arr, tgt_arr):
+                src = s.squeeze(0)
+                tgt = t.squeeze(0)
+                model_out = self.model(np.array(src))
+                local_tgt = []
+                for row in tgt:
+                    lc = [0.0] * 256
+                    lc[np.argmax(row).numpy()] = 1.0
+                    local_tgt.append(lc)
 
-    def _forward_backward(self, src: tf.Tensor, tgt: tf.Tensor) -> tf.Tensor:
-        src = src.cpu().detach().numpy()
-        tgt = tgt.cpu().detach().numpy()/128.0
+                # loss += tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)(tf.reshape(model_out[:,1],(131072,1)),tf.reshape(local_tgt,(131072,1)))
+                loss += tf.keras.losses.CategoricalCrossentropy()(model_out[:,1],local_tgt)
 
-        with tf.GradientTape(persistent=True) as tape:
-            model_out = self.model(src)
-            model_out = model_out/128.0
-            #print('model_out')
-            #print(model_out[:,:,1].shape)
-            #print(tgt.shape)
-            loss = tf.keras.losses.binary_crossentropy(model_out[:,:,1], tgt)
             gradients = tape.gradient(loss,  self.model.trainable_variables)
-            #print(loss)
-            #print(gradients)
+        print(loss)
 
-        #model_out = self.model(src)
-        #model_out = np.array(model_out)/128.0
-        #print(tgt.shape)
-        #print(model_out.shape)
-        #loss = tf.keras.losses.binary_crossentropy(model_out, tgt)
-        return loss
+        print('-------------------------------')
+        #print(model_out)
+        print('gradients',gradients)
+
+        return gradients
 
     def _clip_gradient(self,gradients):
         for p in gradients:
+            print(p)
             if type(p) == tf.IndexedSlices:
-               p_v = p.values
-            for row in p_v:
+               p = p.values
+            print(p)
+            for row in p:
                 g_norm = tf.clip_by_value(row,clip_value_min=self.model.ctx.optimizer.agc.zero_division_eps,clip_value_max=1000)
                 p_norm = tf.clip_by_value(row,clip_value_min=self.model.ctx.optimizer.agc.eps,clip_value_max=1000)
                 grad_scale = tf.clip_by_value((p_norm / g_norm * self.model.ctx.optimizer.agc.gradient_clipping),clip_value_min=-1000,clip_value_max=1)
                 row = row* grad_scale
-                #print(row)
+                print('row')
+                print(row)
 
     def accumulated_step(self, dataloader) -> tf.Tensor:
-        with tf.GradientTape(persistent=True) as tape:
-            loss = sum(self._forward_backward(s.squeeze(0), t.squeeze(0)) for (s, t), _ in
-                       zip(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps)))
 
-            gradients = tape.gradient(loss,  self.model.trainable_variables)
+        gradients = self._forward_backward(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps))
+        # add sum into the self.__forward_backward gradient decent
+        #sum(self._forward_backward(s.squeeze(0), t.squeeze(0)) for (s, t), _ in  zip(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps)))
+
+        print('gradients', gradients)
         #print( "Gradients")
         #print( gradients)
 
@@ -207,7 +215,7 @@ class Trainer(tf.keras.Model):
 
                 self.gradients_vars[i] = p
         self._clip_gradient(gradients)
-        return loss
+        return gradients
 
     def zero_grad(self):
         for p in self.model.parameters():
@@ -235,7 +243,7 @@ class MomentumNetSide():
 
     def forward(self, inp: tf.Tensor):
         return tf.matmul(inp , self.beta)
-
+'''
 class LinearAttention(tf.keras.Model):
     def __init__(self, ctx: Context):
         super(LinearAttention, self).__init__()
@@ -248,25 +256,44 @@ class LinearAttention(tf.keras.Model):
         pos_embd = tf.range(0, ctx.model.sequence_length)
         #self.register_buffer("divisor", pos_embd.unsqueeze(0).to(torch.float).to(ctx.model.device))
 
-        cell = LinearAttentionCell(self, ctx, 1)
-        self.stem = revlib.ReversibleSequential(*[c
-                                                  for i in range(1, 1 + ctx.model.depth)
-                                                  for c in [cell.momentum((1 - ctx.model.momentumnet_beta) /
-                                                                          ctx.model.momentumnet_beta ** i),
-                                                            MomentumNetSide(ctx.model.momentumnet_beta ** i)]],
-                                               target_device=ctx.model.device)
+        self.cell = LinearAttentionCell(self, ctx, 1)
+
         local_conv1d = tf.keras.layers.Conv1D(filters=ctx.dataset.classes, kernel_size=(1,))
         self.local_output = local_conv1d
 
     def call(self, inp: tf.Tensor,traing=None,mask=None):
-        return self.local_output(self.embedding(inp).transpose())
+        return self.local_output(self.cell(self.embedding(inp).transpose()))
 
     def reset_cache(self):
         for mod in self.stem.modules():
             if isinstance(mod, LinearAttentionCell):
                 mod.reset_cache()
+'''
+class LinearAttention(tf.keras.Model):
+    def __init__(self, ctx: Context):
+        super(LinearAttention, self).__init__()
+        self.ctx = ctx
+        self.embedding =tf.keras.layers.Embedding(ctx.dataset.classes, ctx.model.features * 2)
+        self.embedding.build(ctx.dataset.classes)
 
+        orthonormal(self.embedding.embeddings, ctx.model.input_embedding_std * 2 ** -0.5)
 
+        pos_embd = tf.range(0, ctx.model.sequence_length)
+        #self.register_buffer("divisor", pos_embd.unsqueeze(0).to(torch.float).to(ctx.model.device))
+
+        self.cell = LinearAttentionCell(self, ctx, 1)
+
+        local_conv1d = tf.keras.layers.Dense(256)#tf.keras.layers.Conv1D(filters=ctx.dataset.classes, kernel_size=(1,))#tf.keras.layers.Dense(256)#
+        self.local_output = local_conv1d#local_conv1d
+
+    def call(self, inp: tf.Tensor,traing=None,mask=None):
+        #return self.embedding(inp).transpose()
+        return self.local_output(self.cell(self.embedding(inp).transpose()))
+
+    def reset_cache(self):
+        for mod in self.stem.modules():
+            if isinstance(mod, LinearAttentionCell):
+                mod.reset_cache()
 class ParameterStore(object):
     """
     Something (likely deepspeed) changes all parameters in a ParameterList to [1] even though standalone parameters
@@ -326,7 +353,7 @@ class LinearAttentionCell(tf.keras.layers.Layer):
             div = self.divisor()
         elif self.caching:
             self.idx += inp.size(2)
-            div = tf.Tensor([self.idx]).to(inp.device)
+            div = tf.Tensor([self.idx])
         else:
             self.idx = inp.size(2)
             div = tf.range(self.idx, device=inp.device).view(1, 1, -1) + 1
