@@ -4,11 +4,12 @@ import typing
 import numpy as np
 import revlib
 import tensorflow as tf
+tf.config.run_functions_eagerly(True)
 from src.optimizers.build import build_optimizer
 from tensorflow.python.ops.numpy_ops import np_config
 np_config.enable_numpy_behavior()
 from src.dataclass import Context
-tf.compat.v1.enable_eager_execution()
+#tf.compat.v1.enable_eager_execution()
 def split_norm(inp: tf.Tensor) -> tf.Tensor:
     scale0, scale1, shift = tf.split(inp,3, 1)
     return tf.norm(tf.add(tf.multiply(scale0 , scale1) , shift))
@@ -153,44 +154,44 @@ class Trainer(object):
                 tgt = t.squeeze(0)
                 model_out = self.model(np.array(src))
                 local_tgt = []
-                for row in tgt:
-                    lc = [0.0] * 256
-                    lc[np.argmax(row).numpy()] = 1.0
-                    local_tgt.append(lc)
 
-                # loss += tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)(tf.reshape(model_out[:,1],(131072,1)),tf.reshape(local_tgt,(131072,1)))
-                loss += tf.keras.losses.CategoricalCrossentropy()(model_out[:,1],local_tgt)
+                #for row in tgt:
+                #    lc = [0.0] * 256
+                #    lc[np.argmax(row).numpy()] = 1.0
+                #    local_tgt.append(lc)
+
+                loss += tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)(tgt,model_out)
+                #loss += tf.keras.losses.CategoricalCrossentropy()(model_out[:,1],local_tgt)
 
             gradients = tape.gradient(loss,  self.model.trainable_variables)
-        print(loss)
+        print('loss',loss.numpy())
 
         print('-------------------------------')
         #print(model_out)
-        print('gradients',gradients)
-
-        return gradients
+        return gradients,loss
 
     def _clip_gradient(self,gradients):
         for p in gradients:
-            print(p)
+            if p is None:
+                continue
             if type(p) == tf.IndexedSlices:
                p = p.values
-            print(p)
+            len_p = 0
+            p = p[:1000]
             for row in p:
+                len_p += 1
                 g_norm = tf.clip_by_value(row,clip_value_min=self.model.ctx.optimizer.agc.zero_division_eps,clip_value_max=1000)
                 p_norm = tf.clip_by_value(row,clip_value_min=self.model.ctx.optimizer.agc.eps,clip_value_max=1000)
                 grad_scale = tf.clip_by_value((p_norm / g_norm * self.model.ctx.optimizer.agc.gradient_clipping),clip_value_min=-1000,clip_value_max=1)
                 row = row* grad_scale
-                print('row')
-                print(row)
+
 
     def accumulated_step(self, dataloader) -> tf.Tensor:
 
-        gradients = self._forward_backward(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps))
+        gradients,loss = self._forward_backward(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps))
         # add sum into the self.__forward_backward gradient decent
         #sum(self._forward_backward(s.squeeze(0), t.squeeze(0)) for (s, t), _ in  zip(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps)))
 
-        print('gradients', gradients)
         #print( "Gradients")
         #print( gradients)
 
@@ -200,10 +201,13 @@ class Trainer(object):
         if 'gradients_vars' in dir(self):
 
             for element in self.gradients_vars:
-                if type(element) == tf.IndexedSlices:
-                    last_gradient_arr.append(element.values.prev_step)
-                else:
-                    last_gradient_arr.append(element.prev_step)
+                if element is not None:
+                    if type(element) == tf.IndexedSlices:
+                        if 'prev_step' in dir(element.values):
+                         last_gradient_arr.append(element.values.prev_step)
+                    else:
+                        if 'prev_step' in dir(element):
+                           last_gradient_arr.append(element.prev_step)
 
         self.gradients_vars  = gradients
         if len(last_gradient_arr) == len(self.gradients_vars):
@@ -215,7 +219,7 @@ class Trainer(object):
 
                 self.gradients_vars[i] = p
         self._clip_gradient(gradients)
-        return gradients
+        return loss
 
     def zero_grad(self):
         for p in self.model.parameters():
@@ -282,13 +286,13 @@ class LinearAttention(tf.keras.Model):
         #self.register_buffer("divisor", pos_embd.unsqueeze(0).to(torch.float).to(ctx.model.device))
 
         self.cell = LinearAttentionCell(self, ctx, 1)
-
+        self.local_lstm = tf.keras.layers.LSTM(256, return_sequences=True)
         local_conv1d = tf.keras.layers.Dense(256)#tf.keras.layers.Conv1D(filters=ctx.dataset.classes, kernel_size=(1,))#tf.keras.layers.Dense(256)#
         self.local_output = local_conv1d#local_conv1d
 
     def call(self, inp: tf.Tensor,traing=None,mask=None):
         #return self.embedding(inp).transpose()
-        return self.local_output(self.cell(self.embedding(inp).transpose()))
+        return  self.local_lstm(self.local_output(self.cell(self.embedding(inp).transpose())))
 
     def reset_cache(self):
         for mod in self.stem.modules():
