@@ -186,9 +186,12 @@ class Trainer(object):
                 row = row* grad_scale
 
 
-    def accumulated_step(self, dataloader) -> tf.Tensor:
+    def accumulated_step(self, dataloader,strategy) -> tf.Tensor:
+        strategy_result = strategy.run(self._forward_backward, args=(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps)))
+        print('strategy')
+        print(strategy_result)
 
-        gradients,loss = self._forward_backward(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps))
+        gradients,loss = strategy_result#self._forward_backward(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps))
         # add sum into the self.__forward_backward gradient decent
         #sum(self._forward_backward(s.squeeze(0), t.squeeze(0)) for (s, t), _ in  zip(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps)))
 
