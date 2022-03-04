@@ -4,7 +4,7 @@ import typing
 import numpy as np
 import revlib
 import tensorflow as tf
-tf.config.run_functions_eagerly(True)
+#tf.config.run_functions_eagerly(True)
 from src.optimizers.build import build_optimizer
 from tensorflow.python.ops.numpy_ops import np_config
 np_config.enable_numpy_behavior()
@@ -147,24 +147,30 @@ class Trainer(object):
     def _forward_backward(self, src_arr, tgt_arr: tf.Tensor) -> tf.Tensor:
 
         with tf.GradientTape() as tape:
-            tape.watch(self.model.trainable_variables)
-            loss = 0
-            for (s, t), _ in zip(src_arr, tgt_arr):
-                src = s.squeeze(0)
-                tgt = t.squeeze(0)
-                model_out = self.model(np.array(src))
+                tape.watch(self.model.trainable_variables)
+                loss = 0
+                #for (s, t), _ in zip(src_arr, tgt_arr):
+                src = src_arr[0][0]#.squeeze(0)
+                tgt = src_arr[0][1]#.squeeze(0)
+                model_out = self.model(src )
                 local_tgt = []
+                print(tf.shape(src))
+                print(tf.shape(tgt))
+
 
                 #for row in tgt:
                 #    lc = [0.0] * 256
                 #    lc[np.argmax(row).numpy()] = 1.0
                 #    local_tgt.append(lc)
+                loss_obj = tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.SUM)
+    
+                #loss = tf.reduce_sum(loss_obj(labels, predictions)) * (1. / global_batch_size)
 
-                loss += tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)(tgt,model_out)
+                loss +=  tf.reduce_sum(loss_obj(tgt,model_out[:,:,1]))#tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)(tgt,model_out)
                 #loss += tf.keras.losses.CategoricalCrossentropy()(model_out[:,1],local_tgt)
 
-            gradients = tape.gradient(loss,  self.model.trainable_variables)
-        print('loss',loss.numpy())
+                gradients = tape.gradient(loss,  self.model.trainable_variables)
+        print('loss',loss)
 
         print('-------------------------------')
         #print(model_out)
@@ -190,7 +196,7 @@ class Trainer(object):
         local_dataload_arr = []
 
         for (s, t), _ in  zip(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps)):
-           local_dataload_arr.append( s.squeeze(0))
+           local_dataload_arr.append( (s.squeeze(0) ,t.squeeze(0)))
 
         strategy_result = strategy.run(self._forward_backward, args=(local_dataload_arr, range(self.model.ctx.optimizer.gradient_accumulation_steps)))
         
