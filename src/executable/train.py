@@ -24,7 +24,7 @@ def _model_fn(features, labels, mode, params):
     mean_loss = tf.zeros([])  # , device=ctx.model.device, dtype=torch.float16 if ctx.model.float16 else torch.float)
     local_adam = tf.keras.optimizers.Adam()
     i = 0
-    cluster_resolver = tf1.distribute.cluster_resolver.TPUClusterResolver(tpu='')
+    cluster_resolver = tf1.distribute.cluster_resolver.TPUClusterResolver(tpu='homebrewnlp-zerox')
     print("All devices: ", tf1.config.list_logical_devices('TPU'))
     tpu_config = tf1.estimator.tpu.TPUConfig(iterations_per_loop=10)
     config = tf1.estimator.tpu.RunConfig(
@@ -88,9 +88,12 @@ def train_model(ctx: Context, steps=None, load_model: bool = False):
     mean_loss = tf.zeros([])#, device=ctx.model.device, dtype=torch.float16 if ctx.model.float16 else torch.float)
     local_adam = tf.keras.optimizers.Adam()
     i = 0
-    cluster_resolver = tf1.distribute.cluster_resolver.TPUClusterResolver(tpu='')
+    cluster_resolver = tf1.distribute.cluster_resolver.TPUClusterResolver(tpu='homebrewnlp-zerox')
     print("All devices: ", tf1.config.list_logical_devices('TPU'))
+    tf.config.experimental_connect_to_cluster(cluster_resolver)
+    tf.tpu.experimental.initialize_tpu_system(cluster_resolver)
     tpu_config = tf1.estimator.tpu.TPUConfig(iterations_per_loop=10)
+    strategy = tf.distribute.TPUStrategy(cluster_resolver)
     config = tf1.estimator.tpu.RunConfig(
         cluster=cluster_resolver,
         save_checkpoints_steps=None,
@@ -104,7 +107,7 @@ def train_model(ctx: Context, steps=None, load_model: bool = False):
     while True:
         i += 1
 
-        loss = mod.accumulated_step(data)
+        loss = mod.accumulated_step(data,strategy)
         if ctx.optimizer.sharpness_aware_minimization.enabled:
                 for j,p in enumerate(mod.gradients()):
                     if p is not None:
@@ -114,7 +117,7 @@ def train_model(ctx: Context, steps=None, load_model: bool = False):
                         p  = tf.math.add(p,p)
                         p.prev_step = p
                         mod.set_gradients(j,p)
-                loss = mod.accumulated_step(data)
+                loss = mod.accumulated_step(data,strategy)
         local_adam.apply_gradients(zip(mod.gradients_vars, mod.model.trainable_variables))
         #mod.optimizer.step()
             # FIX THIS

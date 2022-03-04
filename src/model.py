@@ -144,7 +144,7 @@ class Trainer(object):
         x_range = tf.range(x.shape.as_list()[-1], dtype=x.dtype)
         return tf.reduce_sum(tf.nn.softmax(x * beta) * x_range, axis=-1)
     @tf.function
-    def _forward_backward(self, src_arr: tf.Tensor, tgt_arr: tf.Tensor) -> tf.Tensor:
+    def _forward_backward(self, src_arr, tgt_arr: tf.Tensor) -> tf.Tensor:
 
         with tf.GradientTape() as tape:
             tape.watch(self.model.trainable_variables)
@@ -187,7 +187,13 @@ class Trainer(object):
 
 
     def accumulated_step(self, dataloader,strategy) -> tf.Tensor:
-        strategy_result = strategy.run(self._forward_backward, args=(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps)))
+        local_dataload_arr = []
+
+        for (s, t), _ in  zip(dataloader, range(self.model.ctx.optimizer.gradient_accumulation_steps)):
+           local_dataload_arr.append( s.squeeze(0))
+
+        strategy_result = strategy.run(self._forward_backward, args=(local_dataload_arr, range(self.model.ctx.optimizer.gradient_accumulation_steps)))
+        
         print('strategy')
         print(strategy_result)
 
