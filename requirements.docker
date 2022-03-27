@@ -1,0 +1,11 @@
+argh==0.26.2
+torch==1.8.1
+#deepspeed==0.6.0
+ftfy==6.0.1
+numpy==1.22
+PyYAML==6.0
+revlib==1.1.0
+rich==12.0.1
+tensorflow==2.8.0
+cloud-tpu-client==0.10
+wandb==0.12.11

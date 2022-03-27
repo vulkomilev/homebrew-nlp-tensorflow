@@ -1,0 +1,3 @@
+sudo docker build -f DOCKERFILE -t homebrewdocker .
+sudo docker run -it -v /home/ubuntu/homebrew-nlp-tensorflow/:/tmp/docker   homebrewdocker /bin/bash
+
