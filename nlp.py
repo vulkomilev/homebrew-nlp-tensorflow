@@ -3,14 +3,14 @@ import tensorflow as tf
 from transformer import Transformer
 import time
 import tensorflow_text as text
-
+#tf.config.run_functions_eagerly(True)
 num_layers = 4
 d_model = 128
 dff = 512
 num_heads = 8
 dropout_rate = 0.1
 EPOCHS = 20
-steps_per_epoch = 10
+steps_per_epoch = 100
 
 _VOCAB = [
     # Special tokens
@@ -43,7 +43,7 @@ _MAX_PREDICTIONS_PER_BATCH = 5
 
 _VOCAB_SIZE = len(_VOCAB)
 
-resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu='homebrewnlp-zerox')
+resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu='local')
 tf.config.experimental_connect_to_cluster(resolver)
 # This is the TPU initialization code that has to be at the beginning.
 tf.tpu.experimental.initialize_tpu_system(resolver)
@@ -105,7 +105,7 @@ optimizer = tf.keras.optimizers.Adam(learning_rate, beta_1=0.9, beta_2=0.98,
                                      epsilon=1e-9)
 loss_object = tf.keras.losses.SparseCategoricalCrossentropy(
     from_logits=True, reduction='none')
-def loss_function(real, pred):
+def losss_function(real, pred):
   mask = tf.math.logical_not(tf.math.equal(real, 0))
   loss_ = loss_object(real, pred)
 
@@ -211,50 +211,74 @@ for epoch in range(EPOCHS):
 '''
 temp_input = tf.random.uniform((64, 38), dtype=tf.int64, minval=0, maxval=200)
 temp_target = tf.random.uniform((64, 36), dtype=tf.int64, minval=0, maxval=200)
+#train_loss = tf.keras.metrics.Mean(name='train_loss')
+
 @tf.function
-def train_multiple_steps(iterator, steps):
+def train_multiple_steps(iterator,iterator_test, steps):
   """The step function for one training step."""
   #train_loss = tf.keras.metrics.Mean(name='train_loss')
   #train_accuracy = tf.keras.metrics.Mean(name='train_accuracy')
+  def loss_function(real, pred):
+    mask = tf.math.logical_not(tf.math.equal(real, 0))
+    loss_ = loss_object(real, pred)
 
+    mask = tf.cast(mask, dtype=loss_.dtype)
+    loss_ *= mask
+
+    return tf.reduce_sum(loss_)/tf.reduce_sum(mask)
   def step_fn(inputs):
       """The computation to run on each TPU device."""
-      train_loss = tf.keras.metrics.Mean(name='train_loss')
-      train_accuracy = tf.keras.metrics.Mean(name='train_accuracy')
+      #train_loss = tf.keras.metrics.Mean(name='train_loss')
+      #train_accuracy = tf.keras.metrics.Mean(name='train_accuracy')
 
-      print('------------------')
-      print(inputs)
-      print('----------------------')
+      #print('------------------')
+      #print(inputs)
+      #print('----------------------')
       inp,tar = inputs
-      print(tar)
-      print()
+      #print(tar)
+      #print()
       tar_inp = [tar[:-1]]
       tar_real = [tar[1:]]
-      print(tar)
-      print(inp)
-      print(tar_inp)
-      print(tar_real)
+      #print(tar)
+      #print(inp)
+      #print(tar_inp)
+      #print(tar_real)
+      #print(tf.convert_to_tensor(tar_inp,dtype=tf.int32))
       inp = [inp]
-      inp = tf.Variable(inp,dtype=tf.int32)
-      tar = tf.Variable(tar,dtype=tf.int32)
-      tar_inp = tf.Variable(tar_inp,dtype=tf.int32)
+      #inp = tf.Variable(inp,dtype=tf.int32)
+      #tar = tf.Variable(tar,dtype=tf.int32)
+      #tar_inp = tf.Variiable(tar_inp,dtype=tf.int32)
+    
       with tf.GradientTape() as tape:
-         predictions, _ = transformer([inp, tar_inp],
+         predictions, _ = transformer([tf.convert_to_tensor(inp), tf.convert_to_tensor(tar_inp,dtype=tf.int32)],
                                  training = True)
          loss = loss_function(tar_real, predictions)
-
+         #tf.print(loss)  
       gradients = tape.gradient(loss, transformer.trainable_variables)
       optimizer.apply_gradients(zip(gradients, transformer.trainable_variables))
-
-      train_loss(loss)
-      train_accuracy(accuracy_function(tf.cast(tar_real,dtype=tf.int32), tf.cast(predictions,dtype=tf.int32)))
+      return predictions
+      #train_loss(loss)
+      #train_accuracy(accuracy_function(tf.cast(tar_real,dtype=tf.int32), tf.cast(predictions,dtype=tf.int32)))
   print(iterator)
   print('++++++++++++++')
   iterator = iter([iterator])
 
   for _ in tf.range(steps):
-    strategy.run(step_fn, args=(next(iterator),))
-
+   #print('===========================')
+   strategy.run(step_fn, args=(next(iterator),))
+  def test(iterator_test):
+     inp = iterator_test[0]
+     tar = iterator_test[1]
+     #print(tar)
+     #print()
+     tar_inp = [tar[:-1]]
+     tar_real = [tar[1:]]
+     inp = [inp]
+  
+     bert_tokenizer.sequences_to_texts(transformer([tf.convert_to_tensor(inp), tf.convert_to_tensor(tar_inp,dtype=tf.int32)],
+                                 training = True))
+  #test(iterator_test)
+  #print('+=++++++=====++=+')
 # Convert `steps_per_epoch` to `tf.Tensor` so the `tf.function` won't get 
 # retraced if the value changes.
 #train_multiple_steps(train_iterator, tf.convert_to_tensor(steps_per_epoch))
@@ -279,7 +303,28 @@ def train_multiple_steps(iterator, steps):
 #train_iterator = iter(train_dataset)
 for (batch, (inp, tar)) in enumerate([examples['text_a']]):
 
- train_multiple_steps([bert_tokenizer.texts_to_sequences([inp])[0], bert_tokenizer.texts_to_sequences([tar])[0]], tf.convert_to_tensor(steps_per_epoch))
+ train_multiple_steps([bert_tokenizer.texts_to_sequences([inp])[0], bert_tokenizer.texts_to_sequences([tar])[0]],[bert_tokenizer.texts_to_sequences([inp])[0], bert_tokenizer.texts_to_sequences([tar])[0]], tf.convert_to_tensor(steps_per_epoch))
+
+def test(iterator_test):
+     inp = iterator_test[0]
+     tar = iterator_test[1]
+     #print(tar)
+     #print()
+     tar_inp = [tar[:-1]]
+     tar_real = [tar[1:]]
+     inp = [inp]
+     print('==============')
+     #print(transformer([tf.convert_to_tensor(inp), tf.convert_to_tensor(tar_inp,dtype=tf.int32)],
+     #                            training = True)[0].numpy().tolist()[0][0])
+     transformer_output = transformer([tf.convert_to_tensor(inp), tf.convert_to_tensor(tar_inp,dtype=tf.int32)],
+                                 training = True)[0].numpy().tolist()[0]
+     for i in range(len(transformer_output[0])):
+         transformer_output[0][i] = int((transformer_output[0][i]+1.0)*30000)
+     #print(transformer_output)
+     #print(bert_tokenizer.sequences_to_texts(transformer_output))
+     print('+++++++++++++++++++++++==')
+     print(tf.convert_to_tensor(inp).numpy().tolist())
+test([bert_tokenizer.texts_to_sequences([inp])[0], bert_tokenizer.texts_to_sequences([tar])[0]])
 
 #fn_out, _ = sample_transformer([temp_input, temp_target], training=False)
 
